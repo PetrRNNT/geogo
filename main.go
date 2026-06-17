@@ -6,9 +6,12 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/lib/pq"
+	"golang.org/x/crypto/bcrypt"
 )
 
 var db *sql.DB
@@ -35,6 +38,18 @@ type Place struct {
 	Lon     float64 `json:"lon"`
 }
 
+type User struct {
+	ID       int    `json:"id"`
+	Email    string `json:"email"`
+	Password string `json:"password,omitempty"`
+}
+
+type Claims struct {
+	UserID int    `json:"user_id"`
+	Email  string `json:"email"`
+	jwt.RegisteredClaims
+}
+
 func main() {
 	var err error
 
@@ -57,7 +72,7 @@ func main() {
 	r.Use(func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type, X-API-Key")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -65,11 +80,13 @@ func main() {
 		c.Next()
 	})
 
-	r.GET("/places", getPlaces)
+	r.POST("/auth/register", register)
+	r.POST("/auth/login", login)
 	r.GET("/geocode", geocode)
 	r.GET("/reverse", reverseGeocode)
+	r.GET("/places", getPlaces)
 
-	protected := r.Group("/", apiKeyMiddleware())
+	protected := r.Group("/", authMiddleware())
 	protected.POST("/places", addPlace)
 
 	r.Run(":8080")
@@ -178,4 +195,100 @@ func reverseGeocode(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, p)
+}
+
+// POST /auth/register
+func register(c *gin.Context) {
+	var u User
+	if err := c.ShouldBindJSON(&u); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ошибка хэширования"})
+		return
+	}
+
+	var id int
+	err = db.QueryRow(`
+        INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id
+    `, u.Email, string(hash)).Scan(&id)
+
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email уже занят"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"message": "Пользователь создан", "id": id})
+}
+
+// POST /auth/login
+func login(c *gin.Context) {
+	var u User
+	if err := c.ShouldBindJSON(&u); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var dbUser User
+	err := db.QueryRow(`
+        SELECT id, email, password FROM users WHERE email = $1
+    `, u.Email).Scan(&dbUser.ID, &dbUser.Email, &dbUser.Password)
+
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверный email или пароль"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(dbUser.Password), []byte(u.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверный email или пароль"})
+		return
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
+		UserID: dbUser.ID,
+		Email:  dbUser.Email,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+		},
+	})
+
+	signed, err := token.SignedString([]byte(os.Getenv("JWT_SECRET")))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Ошибка создания токена"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"token": signed, "email": dbUser.Email})
+}
+
+// Middleware проверки JWT
+func authMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		header := c.GetHeader("Authorization")
+		if header == "" || len(header) < 8 {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Токен не передан"})
+			c.Abort()
+			return
+		}
+
+		tokenStr := header[7:] // убираем "Bearer "
+		claims := &Claims{}
+
+		token, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (interface{}, error) {
+			return []byte(os.Getenv("JWT_SECRET")), nil
+		})
+
+		if err != nil || !token.Valid {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверный или истёкший токен"})
+			c.Abort()
+			return
+		}
+
+		c.Set("user_id", claims.UserID)
+		c.Set("email", claims.Email)
+		c.Next()
+	}
 }
