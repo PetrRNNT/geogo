@@ -1,0 +1,433 @@
+===========================================================
+СТРУКТУРА ПРОЕКТА GEOGO
+===========================================================
+
+C:\Users\ipetr\Documents\GEOGO\
+│
+├── docker-compose.yml                      # Docker Compose для PostgreSQL + PostGIS
+├── go.mod                                  # Модуль Go и зависимости
+├── go.sum                                  # Контрольные суммы зависимостей
+├── main.go                                 # Точка входа, HTTP-сервер (Gin), эндпоинты
+│
+├── docs/
+│   ├── PROJECT_STRUCTURE.txt               # Описание структуры проекта
+│   └── geocoder-session.md                 # Документация — итоги сессии по разработке
+│
+├── internal/
+│   ├── database/
+│   │   └── postgres.go                      # Подключение к PostgreSQL, единственный DSN-источник
+│   │
+│   └── geocoder/
+│       ├── country.go                       # Модель Country
+│       ├── city.go                          # Модель City
+│       ├── poi.go                           # Модель POI
+│       ├── region.go                        # Модель Region
+│       ├── search.go                        # (без реализации) — заготовка для поиска
+│       │
+│       └── repository/
+│           ├── country_repository.go        # (без реализации) — заготовка
+│           ├── city_repository.go           # (без реализации) — заготовка
+│           └── poi_repository.go            # (без реализации) — заготовка
+│
+└── migrations/
+    ├── 001_places.sql                       # PostGIS extension + таблица places
+    ├── 002_countries.sql                    # Таблица countries
+    ├── 003_cities.sql                       # Таблица cities
+    ├── 004_pois.sql                         # Таблица pois
+    ├── 005_regions.sql                      # Таблица regions
+    └── 006_users.sql                        # Таблица users
+
+===========================================================
+СОДЕРЖИМОЕ ФАЙЛОВ
+===========================================================
+
+----------------------------------------------------------
+ФАЙЛ: docker-compose.yml
+----------------------------------------------------------
+Docker Compose для запуска локальной БД.
+Сервис "db" использует image postgis/postgis:16-3.4,
+экспонирует порт 5432, создаёт базу "geocoder"
+с пользователем geo / паролем geopass.
+Использует named volume pgdata.
+
+СОДЕРЖАНИЕ:
+  services:
+    db:
+      image: postgis/postgis:16-3.4
+      environment:
+        POSTGRES_DB: geocoder
+        POSTGRES_USER: geo
+        POSTGRES_PASSWORD: geopass
+      ports:
+        - "5432:5432"
+      volumes:
+        - pgdata:/var/lib/postgresql/data
+
+  volumes:
+    pgdata:
+
+----------------------------------------------------------
+ФАЙЛ: go.mod
+----------------------------------------------------------
+Модуль "geogo", Go 1.25.0.
+
+Основные зависимости:
+  gin-gonic/gin     — HTTP-сервер
+  lib/pq            — драйвер PostgreSQL
+  golang-jwt/jwt/v5 — JWT
+  x/crypto          — bcrypt
+
+----------------------------------------------------------
+ФАЙЛ: go.sum
+----------------------------------------------------------
+Хеши всех зависимостей.
+
+----------------------------------------------------------
+ФАЙЛ: main.go
+----------------------------------------------------------
+Точка входа и весь HTTP-сервер на Gin.
+
+ИМПОРТЫ:
+  database/sql, log, net/http, os, strconv, time
+  geogo/internal/database
+  github.com/gin-gonic/gin
+  github.com/golang-jwt/jwt/v5
+  github.com/lib/pq (драйвер PostgreSQL)
+  golang.org/x/crypto/bcrypt
+
+СТРУКТУРЫ:
+  Place  — id, name, country, city, address, lat, lon
+  User   — id, email, password, role
+  Claims — UserID, Email, Role + jwt.RegisteredClaims
+
+MIDDLEWARE:
+  adminMiddleware()  — проверка роли "admin"
+  authMiddleware()   — verify JWT из заголовка Authorization
+
+API_KEY и apiKeyMiddleware() удалены, потому что не использовались.
+
+ЭНДПОИНТЫ (роуты):
+  POST   /auth/register                — регистрация (публичный)
+  POST   /auth/login                   — вход, возвращает JWT (публичный)
+  GET    /geocode?address=...          — адрес → координаты (публичный)
+  GET    /reverse?lat=...&lon=...      — координаты → адрес (публичный)
+  GET    /places                       — все места (публичный)
+  GET    /me                           — данные текущего пользователя (JWT)
+  POST   /places                       — добавить место (JWT + admin)
+  DELETE /places/:id                   — удалить место (JWT + admin)
+
+ФУНКЦИИ:
+  main()               — database.Connect(), роуты, старт :8080
+  addPlace(c)          — INSERT INTO places с ST_SetSRID(ST_MakePoint)
+  getPlaces(c)         — SELECT всех мест с ST_Y/ST_X для координат
+  geocode(c)           — LIKE-поиск по address/name/city
+  reverseGeocode(c)    — поиск ближайшего места по <-> (KNN)
+  register(c)          — регистрация, хэширование пароля bcrypt
+  login(c)             — проверка пароля, выдача JWT (HS256, 24ч)
+  getMe(c)             — возвращает id/email/role из JWT
+  deletePlace(c)       — DELETE FROM places WHERE id
+
+ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ:
+  DATABASE_URL  — опциональное переопределение DSN
+  JWT_SECRET    — секретный ключ для JWT
+
+----------------------------------------------------------
+ФАЙЛ: docs/geocoder-session.md
+----------------------------------------------------------
+Документация проекта на русском языке.
+
+РАЗДЕЛЫ:
+  1. Текущее состояние
+  2. Исправлено по комментариям
+  3. Стек
+  4. Структура проекта
+  5. docker-compose.yml
+  6. internal/database/postgres.go
+  7. main.go
+  8. Эндпоинты API
+  9. Геокодинг и reverse-геокодинг
+  10. CRUD мест
+  11. JWT-авторизация
+  12. Модели в internal/geocoder
+  13. Репозитории в internal/geocoder/repository
+  14. Миграции
+  15. go.mod
+  16. Переменные окружения
+  17. Запуск локально
+  18. Примеры запросов
+  19. Vue-фронтенд
+  20. Что можно улучшить
+  21. Итог
+
+----------------------------------------------------------
+ФАЙЛ: internal/database/postgres.go
+----------------------------------------------------------
+Пакет database. Функция Connect() является единственным местом
+подключения к PostgreSQL.
+
+Порядок выбора DSN:
+  1. DATABASE_URL, если переменная задана.
+  2. Локальный defaultDSN, совпадающий с docker-compose.yml.
+
+СОДЕРЖАНИЕ:
+  package database
+
+  import (
+    "database/sql"
+    "os"
+
+    _ "github.com/lib/pq"
+  )
+
+  const defaultDSN = "postgres://geo:geopass@localhost:5432/geocoder?sslmode=disable"
+
+  func Connect() (*sql.DB, error) {
+    dsn := os.Getenv("DATABASE_URL")
+    if dsn == "" {
+      dsn = defaultDSN
+    }
+
+    db, err := sql.Open("postgres", dsn)
+    if err != nil {
+      return nil, err
+    }
+
+    if err := db.Ping(); err != nil {
+      _ = db.Close()
+      return nil, err
+    }
+
+    return db, nil
+  }
+
+----------------------------------------------------------
+ФАЙЛ: internal/geocoder/country.go
+----------------------------------------------------------
+Модель Country.
+
+СОДЕРЖАНИЕ:
+  package geocoder
+
+  type Country struct {
+    ID      int64
+    Name    string
+    ISOCode string
+    Lat     float64
+    Lon     float64
+  }
+
+----------------------------------------------------------
+ФАЙЛ: internal/geocoder/city.go
+----------------------------------------------------------
+Модель City.
+
+СОДЕРЖАНИЕ:
+  package geocoder
+
+  type City struct {
+    ID        int64
+    CountryID int64
+    Name      string
+    Lat       float64
+    Lon       float64
+  }
+
+----------------------------------------------------------
+ФАЙЛ: internal/geocoder/poi.go
+----------------------------------------------------------
+Модель POI (Point of Interest).
+
+СОДЕРЖАНИЕ:
+  package geocoder
+
+  type POI struct {
+    ID      int64
+    CityID  int64
+    Name    string
+    Address string
+    Lat     float64
+    Lon     float64
+  }
+
+----------------------------------------------------------
+ФАЙЛ: internal/geocoder/region.go
+----------------------------------------------------------
+Модель Region.
+
+СОДЕРЖАНИЕ:
+  package geocoder
+
+  type Region struct {
+    ID        int64
+    CountryID int64
+    Name      string
+    Lat       float64
+    Lon       float64
+  }
+
+----------------------------------------------------------
+ФАЙЛ: internal/geocoder/search.go
+----------------------------------------------------------
+Файл с package declaration. Заготовка для реализации геокодинга
+и обратного геокодинга.
+
+----------------------------------------------------------
+ФАЙЛ: internal/geocoder/repository/
+  country_repository.go  (0 строк) — заготовка
+  city_repository.go     (0 строк) — заготовка
+  poi_repository.go      (0 строк) — заготовка
+----------------------------------------------------------
+Пустые файлы с package declaration. Предназначены для реализации
+репозиториев (CRUD-операций) над таблицами
+countries, cities, pois в PostgreSQL.
+
+----------------------------------------------------------
+ФАЙЛ: migrations/001_places.sql
+----------------------------------------------------------
+Создаёт PostGIS extension, таблицу places и GIST-индекс.
+
+СОДЕРЖАНИЕ:
+  CREATE EXTENSION IF NOT EXISTS postgis;
+
+  CREATE TABLE IF NOT EXISTS places (
+      id BIGSERIAL PRIMARY KEY,
+
+      name    TEXT NOT NULL,
+      country TEXT,
+      city    TEXT,
+      address TEXT,
+
+      lat DOUBLE PRECISION,
+      lon DOUBLE PRECISION,
+
+      location GEOMETRY(Point, 4326)
+  );
+
+  CREATE INDEX places_location_idx
+  ON places USING GIST(location);
+
+----------------------------------------------------------
+ФАЙЛ: migrations/002_countries.sql
+----------------------------------------------------------
+Создаёт таблицу countries с PostGIS-геометрией.
+
+СОДЕРЖАНИЕ:
+  CREATE TABLE IF NOT EXISTS countries (
+      id BIGSERIAL PRIMARY KEY,
+      name TEXT NOT NULL,
+      iso_code CHAR(2) UNIQUE,
+
+      lat DOUBLE PRECISION,
+      lon DOUBLE PRECISION,
+
+      location GEOMETRY(Point, 4326)
+  );
+
+  CREATE INDEX countries_location_idx
+  ON countries USING GIST(location);
+
+----------------------------------------------------------
+ФАЙЛ: migrations/003_cities.sql
+----------------------------------------------------------
+Создаёт таблицу cities с внешним ключом на countries.
+
+СОДЕРЖАНИЕ:
+  CREATE TABLE IF NOT EXISTS cities (
+      id BIGSERIAL PRIMARY KEY,
+
+      country_id BIGINT REFERENCES countries(id),
+
+      name TEXT NOT NULL,
+
+      lat DOUBLE PRECISION,
+      lon DOUBLE PRECISION,
+
+      location GEOMETRY(Point, 4326)
+  );
+
+  CREATE INDEX cities_location_idx
+  ON cities USING GIST(location);
+
+----------------------------------------------------------
+ФАЙЛ: migrations/004_pois.sql
+----------------------------------------------------------
+Создаёт таблицу pois с внешним ключом на cities.
+
+СОДЕРЖАНИЕ:
+  CREATE TABLE IF NOT EXISTS pois (
+      id BIGSERIAL PRIMARY KEY,
+
+      city_id BIGINT REFERENCES cities(id),
+
+      name TEXT NOT NULL,
+      address TEXT,
+
+      lat DOUBLE PRECISION,
+      lon DOUBLE PRECISION,
+
+      location GEOMETRY(Point, 4326)
+  );
+
+  CREATE INDEX pois_location_idx
+  ON pois USING GIST(location);
+
+----------------------------------------------------------
+ФАЙЛ: migrations/005_regions.sql
+----------------------------------------------------------
+Создаёт таблицу regions с внешним ключом на countries.
+
+СОДЕРЖАНИЕ:
+  CREATE TABLE IF NOT EXISTS regions (
+      id BIGSERIAL PRIMARY KEY,
+
+      country_id BIGINT REFERENCES countries(id),
+
+      name TEXT NOT NULL,
+
+      lat DOUBLE PRECISION,
+      lon DOUBLE PRECISION,
+
+      location GEOMETRY(Point, 4326)
+  );
+
+  CREATE INDEX regions_location_idx
+  ON regions USING GIST(location);
+
+----------------------------------------------------------
+ФАЙЛ: migrations/006_users.sql
+----------------------------------------------------------
+Создаёт таблицу users для JWT-авторизации.
+
+СОДЕРЖАНИЕ:
+  CREATE TABLE IF NOT EXISTS users (
+      id BIGSERIAL PRIMARY KEY,
+
+      email    TEXT UNIQUE NOT NULL,
+      password TEXT NOT NULL,
+      role     TEXT NOT NULL DEFAULT 'user',
+
+      created_at TIMESTAMP DEFAULT NOW()
+  );
+
+===========================================================
+ИТОГ
+===========================================================
+
+Проект находится на стадии рефакторинга: из монолитного
+single-file main.go в чистую многослойную архитектуру
+(layers: handlers → services → repositories → models).
+
+ГОТОВО:
+  ✓ Подключение к БД через internal/database/postgres.go
+  ✓ Синхронизация локального DSN с docker-compose.yml
+  ✓ Удаление неиспользуемого API_KEY/apiKeyMiddleware
+  ✓ Миграции places, countries, cities, pois, regions, users
+  ✓ PostGIS extension в миграциях
+  ✓ Модели Country, City, POI, Region
+
+НЕ ГОТОВО (без реализации):
+  - search.go          (сервисный слой)
+  - repository/*.go     (репозитории)
+
+Стек: Go, Gin, PostgreSQL + PostGIS, Docker Compose,
+Railway (через DATABASE_URL и JWT_SECRET).

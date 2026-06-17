@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"time"
 
+	"geogo/internal/database"
+
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	_ "github.com/lib/pq"
@@ -15,18 +17,6 @@ import (
 )
 
 var db *sql.DB
-
-func apiKeyMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		key := c.GetHeader("X-API-Key")
-		if key != os.Getenv("API_KEY") {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверный ключ"})
-			c.Abort()
-			return
-		}
-		c.Next()
-	}
-}
 
 func adminMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -68,16 +58,12 @@ func main() {
 	var err error
 
 	// Подключение к базе
-	connStr := os.Getenv("DATABASE_URL")
-	db, err = sql.Open("postgres", connStr)
+	db, err = database.Connect()
 	if err != nil {
 		log.Fatal("Ошибка подключения к БД:", err)
 	}
 	defer db.Close()
 
-	if err = db.Ping(); err != nil {
-		log.Fatal("БД недоступна:", err)
-	}
 	log.Println("Подключились к БД!")
 
 	// Роуты
