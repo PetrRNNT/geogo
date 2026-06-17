@@ -13,6 +13,18 @@ import (
 
 var db *sql.DB
 
+func apiKeyMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		key := c.GetHeader("X-API-Key")
+		if key != os.Getenv("API_KEY") {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверный ключ"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 type Place struct {
 	ID      int     `json:"id"`
 	Name    string  `json:"name"`
@@ -41,10 +53,12 @@ func main() {
 
 	// Роуты
 	r := gin.Default()
-	r.POST("/places", addPlace)
 	r.GET("/places", getPlaces)
 	r.GET("/geocode", geocode)
 	r.GET("/reverse", reverseGeocode)
+
+	protected := r.Group("/", apiKeyMiddleware())
+	protected.POST("/places", addPlace)
 
 	r.Run(":8080")
 }
