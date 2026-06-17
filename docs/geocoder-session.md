@@ -305,7 +305,143 @@ curl "https://geogo-production.up.railway.app/reverse?lat=55.75&lon=37.61"
 
 - Возвращать топ-5 результатов вместо одного
 - Добавить расстояние в метрах в ответ `/reverse`
-- Добавить `DELETE /places/:id` и `PUT /places/:id`
+- Добавить `PUT /places/:id`
 - Вынести конфиг в отдельный файл
 - Написать тесты
 - Импорт данных из OpenStreetMap
+
+---
+
+## Vue фронт
+
+Стек: Vue 3, Leaflet, Axios, тёмная тема.
+
+### Структура
+
+```
+geocoder-front/
+├── src/
+│   ├── App.vue
+│   ├── api.js
+│   ├── stores/
+│   │   └── auth.js
+│   └── views/
+│       ├── AuthView.vue
+│       ├── SearchView.vue
+│       ├── AddPlaceView.vue
+│       └── PlacesView.vue
+├── .env
+└── package.json
+```
+
+### .env
+
+```
+VITE_API_URL=https://geogo-production.up.railway.app
+```
+
+### Вкладки
+
+| Вкладка | Кто видит | Что делает |
+|---------|-----------|-----------|
+| Поиск | Все | Адрес → координаты, координаты → адрес, карта |
+| Все места | Все | Список мест с фильтром, детальная панель |
+| Добавить место | Только админ | Форма + клик по карте |
+
+### Карта
+
+Используется Leaflet + тёмные тайлы CartoCDN:
+```javascript
+L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png')
+```
+
+---
+
+## JWT авторизация
+
+### Таблица users
+
+```sql
+CREATE TABLE users (
+    id         SERIAL PRIMARY KEY,
+    email      TEXT UNIQUE NOT NULL,
+    password   TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT 'user',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+```
+
+### Роли
+
+| Роль | Права |
+|------|-------|
+| `user` | Поиск, просмотр мест |
+| `admin` | Всё выше + добавление и удаление мест |
+
+Сделать себя админом:
+```sql
+UPDATE users SET role = 'admin' WHERE email = 'твой@email.com';
+```
+
+### Переменные окружения на Railway
+
+```
+JWT_SECRET = длинная_случайная_строка
+```
+
+### Эндпоинты авторизации
+
+| Метод | URL | Описание |
+|-------|-----|----------|
+| `POST` | `/auth/register` | Регистрация |
+| `POST` | `/auth/login` | Вход, возвращает JWT токен |
+| `GET` | `/me` | Данные текущего пользователя |
+
+### Защита роутов
+
+```go
+// Публичные
+r.GET("/geocode", geocode)
+r.GET("/reverse", reverseGeocode)
+r.GET("/places", getPlaces)
+r.POST("/auth/register", register)
+r.POST("/auth/login", login)
+
+// Для авторизованных
+protected := r.Group("/", authMiddleware())
+protected.GET("/me", getMe)
+
+// Только для админа
+admin := r.Group("/", authMiddleware(), adminMiddleware())
+admin.POST("/places", addPlace)
+admin.DELETE("/places/:id", deletePlace)
+```
+
+### Токен на фронте
+
+Токен хранится в `localStorage` и автоматически добавляется в каждый запрос через axios interceptor:
+
+```javascript
+api.interceptors.request.use((config) => {
+  if (auth.token) {
+    config.headers.Authorization = `Bearer ${auth.token}`
+  }
+  return config
+})
+```
+
+---
+
+## Начальные данные
+
+20 знаковых мест по всему миру — Кремль, Эйфелева башня, Колизей, Тадж-Махал и другие. Залиты через консоль Railway в PostGIS.
+
+---
+
+## Деплой фронта на Railway
+
+1. GitHub репозиторий с Vue проектом
+2. Railway → New Service → GitHub repo
+3. Variables: `VITE_API_URL`
+4. Start command: `npx serve dist --listen $PORT`
+5. Networking → порт `8080` → Generate Domain
