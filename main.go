@@ -28,6 +28,18 @@ func apiKeyMiddleware() gin.HandlerFunc {
 	}
 }
 
+func adminMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		role, exists := c.Get("role")
+		if !exists || role != "admin" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Недостаточно прав"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
+
 type Place struct {
 	ID      int     `json:"id"`
 	Name    string  `json:"name"`
@@ -42,11 +54,13 @@ type User struct {
 	ID       int    `json:"id"`
 	Email    string `json:"email"`
 	Password string `json:"password,omitempty"`
+	Role     string `json:"role,omitempty"`
 }
 
 type Claims struct {
 	UserID int    `json:"user_id"`
 	Email  string `json:"email"`
+	Role   string `json:"role"`
 	jwt.RegisteredClaims
 }
 
@@ -86,8 +100,14 @@ func main() {
 	r.GET("/reverse", reverseGeocode)
 	r.GET("/places", getPlaces)
 
+	// Защищённые роуты для всех авторизованных
 	protected := r.Group("/", authMiddleware())
-	protected.POST("/places", addPlace)
+	protected.GET("/me", getMe)
+
+	// Только для админа
+	admin := r.Group("/", authMiddleware(), adminMiddleware())
+	admin.POST("/places", addPlace)
+	admin.DELETE("/places/:id", deletePlace)
 
 	r.Run(":8080")
 }
@@ -234,8 +254,8 @@ func login(c *gin.Context) {
 
 	var dbUser User
 	err := db.QueryRow(`
-        SELECT id, email, password FROM users WHERE email = $1
-    `, u.Email).Scan(&dbUser.ID, &dbUser.Email, &dbUser.Password)
+        SELECT id, email, password, role FROM users WHERE email = $1
+    `, u.Email).Scan(&dbUser.ID, &dbUser.Email, &dbUser.Password, &dbUser.Role)
 
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Неверный email или пароль"})
@@ -250,6 +270,7 @@ func login(c *gin.Context) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, Claims{
 		UserID: dbUser.ID,
 		Email:  dbUser.Email,
+		Role:   dbUser.Role,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
 		},
@@ -261,7 +282,25 @@ func login(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"token": signed, "email": dbUser.Email})
+	c.JSON(http.StatusOK, gin.H{"token": signed, "email": dbUser.Email, "role": dbUser.Role})
+}
+
+func getMe(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"id":    c.GetInt("user_id"),
+		"email": c.GetString("email"),
+		"role":  c.GetString("role"),
+	})
+}
+
+func deletePlace(c *gin.Context) {
+	id := c.Param("id")
+	_, err := db.Exec(`DELETE FROM places WHERE id = $1`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "Место удалено"})
 }
 
 // Middleware проверки JWT
@@ -289,6 +328,7 @@ func authMiddleware() gin.HandlerFunc {
 
 		c.Set("user_id", claims.UserID)
 		c.Set("email", claims.Email)
+		c.Set("role", claims.Role)
 		c.Next()
 	}
 }
